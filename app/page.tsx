@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect, createContext, useContext } from 'react';
+import React, { useState, useCallback, useRef, useEffect, createContext, useContext } from 'react';
 import ReactFlow, {
     Background,
     Controls,
@@ -23,21 +23,39 @@ import { Textarea } from '@/components/ui/textarea';
 import { Loader2, Maximize2, Bug } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
-// 模拟API调用
-const callChatAPI = async (message: string): Promise<string> => {
-    await new Promise(resolve => setTimeout(resolve, 100));
-    return `### 回复内容
+// 实际API调用
+const callChatAPI = async (message: string, upstreamNodes?: Array<{node: any, connectionType: string}>): Promise<string> => {
+    // 格式化上游节点的对话历史
+    const formatted = upstreamNodes?.flatMap(node => {
+        const { question, answer } = node.node.data;
+        return [
+            ["human", question],
+            ["ai", answer],
+        ];
+    }) || [];
 
-这是对"${message}"的回复。
+    try {
+        const response = await fetch('/api/langchain', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                history: formatted,
+                text: message
+            }),
+        });
 
-\`\`\`javascript
-console.log("这是一个代码示例");
-\`\`\`
+        if (!response.ok) {
+            throw new Error(`API 错误! 状态码: ${response.status}`);
+        }
 
-- 第一点
-- 第二点
-- 第三点
-`;
+        const data = await response.json();
+        return data.result  || '无法获取回复';
+    } catch (error) {
+        console.error('API调用失败:', error);
+        throw new Error('无法连接到AI服务，请稍后再试');
+    }
 };
 
 // 创建一个Context来传递节点操作函数
@@ -55,12 +73,14 @@ const ChatNode = ({ id, data, isConnectable }) => {
 
     const handleContinueClick = (e) => {
         e.stopPropagation();
+        if (data.isLoading) return; // 如果正在加载，不执行操作
         console.log('继续按钮被点击', id);
         nodeActions.onContinueNode(id);
     };
 
     const handleForkClick = (e) => {
         e.stopPropagation();
+        if (data.isLoading) return; // 如果正在加载，不执行操作
         console.log('Fork按钮被点击', id);
         nodeActions.onForkNode(id);
     };
@@ -83,7 +103,7 @@ const ChatNode = ({ id, data, isConnectable }) => {
     };
 
     return (
-        <div 
+        <div
             className="bg-white border border-gray-200 rounded-md p-4 shadow-md w-[350px] h-[220px] overflow-hidden cursor-pointer"
             onClick={handleNodeClick}
         >
@@ -99,14 +119,14 @@ const ChatNode = ({ id, data, isConnectable }) => {
                 position={Position.Bottom}
                 id="source-bottom"
                 style={{ background: '#555', width: 10, height: 10 }}
-                isConnectable={isConnectable}
+                // isConnectable={false}  // 设置为false禁止用户手动连线
             />
             <Handle
                 type="source"
                 position={Position.Right}
                 id="source-right"
                 style={{ background: '#555', width: 10, height: 10 }}
-                isConnectable={isConnectable}
+                // isConnectable={false}  // 设置为false禁止用户手动连线
             />
 
             <div className="absolute top-2 right-2 flex gap-1">
@@ -169,14 +189,20 @@ const ChatNode = ({ id, data, isConnectable }) => {
                     variant="outline"
                     size="sm"
                     onClick={handleContinueClick}
-                    className="bg-black text-white hover:bg-gray-800">
+                    disabled={data.isLoading}
+                    className={`${data.isLoading
+                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        : 'bg-black text-white hover:bg-gray-800'}`}>
                     继续
                 </Button>
                 <Button
                     variant="outline"
                     size="sm"
                     onClick={handleForkClick}
-                    className="bg-red-500 text-white hover:bg-red-600">
+                    disabled={data.isLoading}
+                    className={`${data.isLoading
+                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                        : 'bg-red-500 text-white hover:bg-red-600'}`}>
                     Fork
                 </Button>
             </div>
@@ -202,6 +228,10 @@ export default function ChatBotPage() {
     const [reactFlowInstance, setReactFlowInstance] = useState(null);
     const nodeRefsMap = useRef<Map<string, any>>(new Map());
 
+    // 添加边的选择状态和菜单状态
+    const [selectedEdge, setSelectedEdge] = useState(null);
+    const [edgeContextMenu, setEdgeContextMenu] = useState({ visible: false, x: 0, y: 0 });
+
     const [debugInfo, setDebugInfo] = useState({
         lastAction: '',
         lastNodeId: '',
@@ -223,7 +253,6 @@ export default function ChatBotPage() {
     const getUpstreamNodes = useCallback((nodeId: string): Array<{ node: any, connectionType: string }> => {
         const result: Array<{ node: any, connectionType: string }> = [];
         const currentNode = nodes.find(n => n.id === nodeId);
-        debugger;
         if (currentNode) {
             result.push({ node: currentNode, connectionType: 'self' });
             const incomingEdges = edges.filter(edge => edge.target === nodeId);
@@ -285,7 +314,7 @@ ${formattedInfo}`);
         return edges.some(edge => edge.target === nodeId && edge.targetHandle === 'target-top');
     }, [edges]);
 
-    const createNode = useCallback(async (question: string, position, sourceId = null, actionType = 'create') => {
+    const createNode = useCallback((question: string, position, sourceId = null, actionType = 'create') => {
         console.log('创建节点:', { question, position, sourceId, actionType });
         const nodeId = `node_${nodeIdCounter.current}`;
         nodeIdCounter.current += 1;
@@ -337,46 +366,26 @@ ${formattedInfo}`);
             console.log('创建新边:', newEdge);
             setEdges(eds => [...eds, newEdge]);
         }
-        try {
-            const answer = await callChatAPI(question);
-            setNodes(nds =>
-                nds.map(node => {
-                    if (node.id === nodeId) {
-                        const updatedNode = {
-                            ...node,
-                            data: {
-                                ...node.data,
-                                answer,
-                                isLoading: false,
-                            },
-                        };
-                        nodeRefsMap.current.set(nodeId, updatedNode);
-                        return updatedNode;
-                    }
-                    return node;
-                })
-            );
-        } catch (error) {
-            console.error('API调用失败:', error);
-            setNodes(nds =>
-                nds.map(node => {
-                    if (node.id === nodeId) {
-                        return {
-                            ...node,
-                            data: {
-                                ...node.data,
-                                answer: '获取回答时出错，请重试。',
-                                isLoading: false,
-                            },
-                        };
-                    }
-                    return node;
-                })
-            );
-        }
+
+        // 返回创建的节点ID，以便后续使用
+        return nodeId;
     }, [setNodes, setEdges, checkForCycle]);
 
     const handleContextMenu = useCallback((event) => {
+        // 判断右键点击是否来自边或节点
+        const target = event.target;
+        // 检查是否点击在边或节点上，react-flow为边添加了特定的类名
+        const isEdgeClick = target.classList && (
+            target.classList.contains('react-flow__edge') ||
+            target.parentElement?.classList.contains('react-flow__edge') ||
+            target.closest('.react-flow__edge') !== null
+        );
+
+        // 如果是在边上点击，则不触发创建节点对话框
+        if (isEdgeClick) {
+            return;
+        }
+
         event.preventDefault();
         if (reactFlowInstance) {
             const position = reactFlowInstance.screenToFlowPosition({
@@ -491,7 +500,7 @@ ${cacheInfo || "无节点"}
         }
     }, [nodes]);
 
-    const onSubmitDialog = useCallback(() => {
+    const onSubmitDialog = useCallback(async () => {
         if (!userInput.trim()) return;
         console.log('提交对话:', {
             userInput,
@@ -542,8 +551,61 @@ ${cacheInfo || "无节点"}`);
                 return;
             }
         }
-        createNode(userInput, position, sourceNodeId, actionType);
-    }, [userInput, actionType, sourceNodeId, contextMenuPosition, nodes, createNode]);
+
+        // 先创建节点（不包含调用API）
+        const nodeId = createNode(userInput, position, sourceNodeId, actionType);
+
+        // 然后在这里调用API并更新节点
+        try {
+            // 获取上游节点信息
+            let upstreamNodes = [];
+            if (sourceNodeId) {
+                // 首先等待节点被添加到状态中
+                await new Promise(resolve => setTimeout(resolve, 0));
+                // upstreamNodes = getUpstreamNodes(sourceNodeId);
+                upstreamNodes = [...getUpstreamNodes(sourceNodeId)].reverse();
+            }
+
+            console.log('调用API获取回复:', userInput);
+            const answer = await callChatAPI(userInput, upstreamNodes);
+
+            // 更新节点状态
+            setNodes(nds =>
+                nds.map(node => {
+                    if (node.id === nodeId) {
+                        const updatedNode = {
+                            ...node,
+                            data: {
+                                ...node.data,
+                                answer,
+                                isLoading: false,
+                            },
+                        };
+                        nodeRefsMap.current.set(nodeId, updatedNode);
+                        return updatedNode;
+                    }
+                    return node;
+                })
+            );
+        } catch (error) {
+            console.error('API调用失败:', error);
+            setNodes(nds =>
+                nds.map(node => {
+                    if (node.id === nodeId) {
+                        return {
+                            ...node,
+                            data: {
+                                ...node.data,
+                                answer: '获取回答时出错，请重试。',
+                                isLoading: false,
+                            },
+                        };
+                    }
+                    return node;
+                })
+            );
+        }
+    }, [userInput, actionType, sourceNodeId, contextMenuPosition, nodes, createNode, getUpstreamNodes]);
 
     useEffect(() => {
         nodes.forEach(node => {
@@ -569,7 +631,24 @@ ${cacheInfo || "无节点"}`);
             return;
         }
 
-        setEdges(eds => addEdge(params, eds));
+        // 用户手动创建的连接显示为绿色
+        const edge = {
+            ...params,
+            style: {
+                stroke: '#4CAF50',  // 绿色
+                strokeWidth: 3
+            },
+            animated: true,
+            markerEnd: {
+                type: MarkerType.ArrowClosed,
+                color: '#4CAF50',  // 绿色
+                width: 20,
+                height: 20,
+            },
+            data: { actionType: 'manual' }, // 标记为手动连接
+        };
+
+        setEdges(eds => addEdge(edge, eds));
     }, [setEdges, hasParentNode, checkForCycle]);
 
     useEffect(() => {
@@ -640,6 +719,40 @@ ${cacheInfo || "无节点"}`);
         nodeActions.onViewDetails = (nodeId) => handleViewNodeDetails(nodeId);
     }, [handleContinue, handleFork, handleDeleteNode, showNodeDebugInfo, handleViewNodeDetails]);
 
+    // 处理边的右键点击
+    const handleEdgeContextMenu = useCallback((event, edge) => {
+        debugger
+        event.preventDefault();
+        if (reactFlowInstance) {
+            setSelectedEdge(edge);
+            setEdgeContextMenu({
+                visible: true,
+                x: event.clientX,
+                y: event.clientY,
+            });
+        }
+    }, [reactFlowInstance]);
+
+    // 删除连接线
+    const handleDeleteEdge = useCallback(() => {
+        if (selectedEdge) {
+            setEdges(eds => eds.filter(e => e.id !== selectedEdge.id));
+            setSelectedEdge(null);
+            setEdgeContextMenu({ visible: false, x: 0, y: 0 });
+        }
+    }, [selectedEdge, setEdges]);
+
+    // 关闭边的上下文菜单
+    const closeEdgeContextMenu = useCallback(() => {
+        setEdgeContextMenu({ visible: false, x: 0, y: 0 });
+        setSelectedEdge(null);
+    }, []);
+
+    // 点击其他地方关闭菜单
+    const handlePaneClick = useCallback(() => {
+        closeEdgeContextMenu();
+    }, [closeEdgeContextMenu]);
+
     return (
         <NodeActionsContext.Provider value={nodeActions}>
             <div className="w-full h-screen" ref={reactFlowWrapper}>
@@ -652,12 +765,35 @@ ${cacheInfo || "无节点"}`);
                     nodeTypes={nodeTypes}
                     onInit={setReactFlowInstance}
                     onContextMenu={handleContextMenu}
+                    onEdgeContextMenu={handleEdgeContextMenu}
+                    onPaneClick={handlePaneClick}
                     fitView
                 >
                     <Controls />
                     <MiniMap />
                     <Background variant="dots" gap={12} size={1} />
                 </ReactFlow>
+
+                {/* 边的上下文菜单 */}
+                {edgeContextMenu.visible && (
+                    <div
+                        className="fixed z-50 bg-white shadow-md rounded-md p-2"
+                        style={{
+                            left: edgeContextMenu.x,
+                            top: edgeContextMenu.y
+                        }}
+                    >
+                        <div
+                            className="cursor-pointer hover:bg-red-100 p-2 rounded flex items-center text-red-500"
+                            onClick={handleDeleteEdge}
+                        >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                            删除连接线
+                        </div>
+                    </div>
+                )}
 
                 <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
                     <DialogContent className="sm:max-w-[500px] max-h-[80vh] overflow-y-auto">
@@ -695,7 +831,7 @@ ${cacheInfo || "无节点"}`);
                                 {(() => {
                                     // 获取当前节点及所有上游节点
                                     const upstreamNodes = getUpstreamNodes(selectedNode.id);
-                                    
+
                                     // 按照ID排序（假设ID中的数字部分表示创建顺序）
                                     const sortedNodes = upstreamNodes
                                         .filter(item => item.node)
@@ -704,24 +840,24 @@ ${cacheInfo || "无节点"}`);
                                             const idB = parseInt(b.node.id.replace(/\D/g, '')) || 0;
                                             return idA - idB;
                                         });
-                                    
+
                                     return sortedNodes.map((item, index) => {
                                         const { node, connectionType } = item;
                                         // 显示连接类型标识（仅对非第一个节点显示）
                                         const connectionBadge = index > 0 ? (
                                             <div className={`text-xs px-2 py-1 rounded-full mb-1 inline-block ${
-                                                connectionType === 'fork' 
-                                                    ? 'bg-red-100 text-red-800' 
+                                                connectionType === 'fork'
+                                                    ? 'bg-red-100 text-red-800'
                                                     : 'bg-gray-100 text-gray-800'
                                             }`}>
                                                 {connectionType === 'fork' ? '分支对话' : '继续对话'}
                                             </div>
                                         ) : null;
-                                        
+
                                         return (
                                             <div key={node.id} className="border-b pb-4 last:border-b-0">
                                                 {connectionBadge}
-                                                
+
                                                 {/* 问题部分 */}
                                                 <div className="flex items-start mb-2">
                                                     <div className="h-8 w-8 rounded-full bg-gray-200 flex items-center justify-center mr-2">
@@ -731,7 +867,7 @@ ${cacheInfo || "无节点"}`);
                                                         <p className="text-gray-800 whitespace-pre-wrap">{node.data.question}</p>
                                                     </div>
                                                 </div>
-                                                
+
                                                 {/* 回答部分 */}
                                                 <div className="flex items-start pl-10">
                                                     <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center mr-2">
